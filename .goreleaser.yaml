@@ -1,0 +1,192 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: dockdeps
+
+before:
+  hooks:
+    # Run vet and the race-enabled test suite so a release is blocked
+    # if those gates ever drift into a non-green state.
+    - go mod tidy
+    - go vet ./...
+    - go test -race -count=1 -timeout 60s ./...
+
+builds:
+  - main: ./cmd/dockdeps
+    binary: dockdeps
+    id: dockdeps
+    env:
+      - CGO_ENABLED=0
+    flags:
+      # -trimpath strips the build-machine filesystem paths from the
+      # binary so the tool behaves identically regardless of who built
+      # it.
+      - -trimpath
+    ldflags:
+      # -s strips the symbol table; -w strips DWARF debug info.
+      # -X main.Version={{.Version}} injects the git tag at build
+      # time so `dockdeps version` reports the correct value.
+      - -s -w
+      - -X main.Version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 isn't generally usable; GitHub-hosted runners
+      # build it but the resulting binary is rare in the wild.
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats: [tar.gz, zip]
+    # Archive name shape per platform.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      # Ship the README and LICENSE inside each archive so downstream
+      # consumers get the docs with the binary.
+      - README.md
+      - LICENSE*
+
+checksum:
+  # The checksum file is included in the release as `checksums.txt` so
+  # consumers can verify the binary integrity with sha256sum.
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  # `goreleaser release --snapshot` produces binaries tagged with the
+  # next-patch version + '-next' suffix and a fake SHA. Useful for
+  # verifying the config locally without pushing a tag.
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  use: git
+  sort: asc
+  # Conventional-commit groups matched against the commit subject.
+  # Anything that doesn't match one of these regexes lands under
+  # "Other changes". Same groups GitHub itself defaults to.
+  groups:
+    - title: Features
+      regexp: "^feat"
+      order: 0
+    - title: 'Bug fixes'
+      regexp: "^fix"
+      order: 1
+    - title: 'Documentation changes'
+      regexp: "^docs"
+      order: 2
+    - title: 'Continuous integration'
+      regexp: "^ci"
+      order: 3
+    - title: Refactors
+      regexp: "^refactor"
+      order: 4
+    - title: Tests
+      regexp: "^test"
+      order: 5
+    - title: 'Build configuration'
+      regexp: "^chore|build|ci|style"
+      order: 6
+
+release:
+  github:
+    owner: inful
+    name: dockdeps
+  prerelease: auto
+
+# Builds and publishes multi-arch Docker images to GitHub Container
+# Registry on every tag push via `docker buildx`. Same trigger as the
+# binary release - a single tag produces both the GitHub Release
+# assets AND the GHCR manifest lists.
+#
+#   Production image (no shell, ~3 MB base, smaller):
+#     ghcr.io/inful/dockdeps:vX.Y.Z          (immutable, manifest list)
+#     ghcr.io/inful/dockdeps:latest          (mutable, follows most recent)
+#
+#   Debug image (busybox shell + utilities, ~6 MB base):
+#     ghcr.io/inful/dockdeps:vX.Y.Z-debug    (immutable, manifest list)
+#     ghcr.io/inful/dockdeps:latest-debug    (mutable, follows most recent)
+#
+# Why dockers_v2 (since v2.12) instead of dockers (deprecated):
+#   - Single docker buildx call produces a manifest list that resolves
+#     to the right per-arch image automatically.
+#   - GoReleaser pre-builds the binaries and lays them out at
+#     builddir/linux/amd64/ and builddir/linux/arm64/ in the build
+#     context, so each Dockerfile just COPYs the matching
+#     $TARGETPLATFORM/dockdeps - no QEMU, no in-image `go build`.
+#   - Annotations (OCI labels) render from templates without injecting
+#     them via --label docker build flags.
+#
+# Runtime base images:
+#   gcr.io/distroless/static:nonroot        (production, no shell)
+#   gcr.io/distroless/static:debug-nonroot (debug, busybox + shell)
+#   Both ship ca-certificates (required for TLS to GitHub / GitLab /
+#   Gitea / Forgejo) and run as uid 65532.
+dockers_v2:
+  - id: dockdeps
+    images:
+      - ghcr.io/inful/dockdeps
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile
+    # SBOM attestation is enabled by default; the workflow installs
+    # docker/buildx-action which provides the docker-container driver
+    # that supports --attest=type=sbom.
+    annotations:
+      # `index:` scope applies each annotation to the manifest list
+      # (the multi-platform tag itself), which makes them visible to
+      # `docker buildx imagetools inspect` and registry UIs. The
+      # release workflow's docker-container driver accepts
+      # index: annotations on per-platform builds; a local
+      # `goreleaser release --snapshot` run with the default
+      # `docker` driver will reject them with "index annotations
+      # not supported for single platform export" — that's a
+      # snapshot-mode limitation, not a config bug.
+      "index,manifest:org.opencontainers.image.title": "dockdeps"
+      "index,manifest:org.opencontainers.image.description": "Track Docker image dependencies across multiple forges (GitHub, GitLab, Forgejo/Gitea)."
+      "index,manifest:org.opencontainers.image.source": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.url": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.documentation": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.licenses": "GPL-3.0"
+      "index,manifest:org.opencontainers.image.created": "{{ .Date }}"
+      "index,manifest:org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "index,manifest:org.opencontainers.image.version": "{{ .Version }}"
+
+  # Debug image. Same binary, same UID, but the runtime base is
+  # gcr.io/distroless/static:debug-nonroot which adds busybox + a
+  # shell. Lets CI jobs run the binary AND have `ls`/`cat`/etc.
+  # available without switching images, and lets operators
+  # `docker exec -it ... /busybox/sh` into a running container.
+  - id: dockdeps-debug
+    images:
+      - ghcr.io/inful/dockdeps
+    tags:
+      - "{{ .Version }}-debug"
+      - latest-debug
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile.debug
+    annotations:
+      "index,manifest:org.opencontainers.image.title": "dockdeps-debug"
+      "index,manifest:org.opencontainers.image.description": "Debug variant of dockdeps: same binary, same UID, but the runtime base (gcr.io/distroless/static:debug-nonroot) ships busybox + a shell so the image can be inspected interactively. Use this in CI jobs that want shell tools available alongside the binary, or to debug a running container with `docker exec`."
+      "index,manifest:org.opencontainers.image.source": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.url": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.documentation": "https://github.com/inful/dockdeps"
+      "index,manifest:org.opencontainers.image.licenses": "GPL-3.0"
+      "index,manifest:org.opencontainers.image.created": "{{ .Date }}"
+      "index,manifest:org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "index,manifest:org.opencontainers.image.version": "{{ .Version }}-debug"

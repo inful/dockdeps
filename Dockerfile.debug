@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+#
+# Debug image for dockdeps. Same binary and UID as the production
+# image, but the runtime base is gcr.io/distroless/static:debug-nonroot
+# which adds busybox + a shell. Useful for CI jobs that want shell
+# tools available alongside the binary, and for operators who
+# want to `docker exec -it ... /busybox/sh` into a running container.
+
+FROM gcr.io/distroless/static:debug-nonroot
+
+COPY --chown=nonroot:nonroot builddir/$TARGETPLATFORM/dockdeps /usr/local/bin/dockdeps
+
+# JSON form because distroless has no shell.
+ENTRYPOINT ["/usr/local/bin/dockdeps"]

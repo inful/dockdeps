@@ -1,0 +1,15 @@
+# Build artifacts
+/dist/
+/coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Go test artifacts
+*.test
+*.out
+
+# OS
+.DS_Store

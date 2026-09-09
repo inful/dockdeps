@@ -30,6 +30,23 @@ cd dockdeps
 go build -o dockdeps ./cmd/dockdeps
 ```
 
+Pre-built binaries for Linux, macOS, and Windows (amd64 + arm64) are published at https://github.com/inful/dockdeps/releases.
+
+## Releasing
+
+Releases are automated via [goreleaser](https://goreleaser.com). Push a `vX.Y.Z` tag and the GitHub Actions workflow at `.github/workflows/release.yml` builds, signs (via checksums), and publishes:
+
+- Cross-platform binaries (linux/darwin/windows × amd64/arm64)
+- A Docker image to GHCR (`ghcr.io/inful/dockdeps:vX.Y.Z` and `:latest`)
+- A debug-variant Docker image with busybox shell (`-debug` tags)
+
+Local dry-run:
+
+```bash
+goreleaser release --snapshot --clean --skip=publish,docker
+# inspect dist/
+```
+
 ## Quickstart
 
 ```bash
