@@ -8,7 +8,9 @@
 
 FROM gcr.io/distroless/static:debug-nonroot
 
-COPY --chown=nonroot:nonroot builddir/$TARGETPLATFORM/dockdeps /usr/local/bin/dockdeps
+# See production Dockerfile for why this ARG is required.
+ARG TARGETPLATFORM
+COPY --chown=nonroot:nonroot ${TARGETPLATFORM}/dockdeps /usr/local/bin/dockdeps
 
 # JSON form because distroless has no shell.
 ENTRYPOINT ["/usr/local/bin/dockdeps"]
