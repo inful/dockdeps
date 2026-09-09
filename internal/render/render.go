@@ -44,13 +44,13 @@ func writeTree(w io.Writer, t *graph.TreeNode, prefix string, isRoot, isLast boo
 
 	if isRoot {
 		// Root: no connector, no indent.
-		fmt.Fprintf(w, "%s: %s\n", kindLabel, t.ID)
+		_, _ = fmt.Fprintf(w, "%s: %s\n", kindLabel, t.ID)
 	} else {
 		connector := "├─ "
 		if isLast {
 			connector = "└─ "
 		}
-		fmt.Fprintf(w, "%s%s%s: %s\n", prefix, connector, kindLabel, t.ID)
+		_, _ = fmt.Fprintf(w, "%s%s%s: %s\n", prefix, connector, kindLabel, t.ID)
 	}
 
 	// The prefix passed to children is this node's prefix, plus a

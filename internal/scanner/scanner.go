@@ -1,21 +1,30 @@
-// Package scanner walks configured forges, fetches Dockerfiles, and
+// Package scanner walks one forge, fetches Dockerfiles, and
 // extracts dependency edges into a Store.
 //
-// The scanner is the heart of dockdeps' "scan" command. It takes a
-// multiforge.Client and a config; for each forge:
+// One Scanner = one forge. The Client passed to New must be bound
+// to a single backend; multi-forge configs require callers to
+// iterate over cfg.Forges and construct one Scanner per forge, then
+// apply aliases once at the end. This separation exists because a
+// multiforge.Client is bound to one backend at construction time
+// (a single HTTP client cannot talk to both github.com and
+// gitlab.com simultaneously).
 //
-//  1. List the user's repos.
-//  2. For each repo, fetch the file tree at the default branch and
-//     identify candidate Dockerfiles (root-level "Dockerfile", any
+// For each repo at the configured forge:
+//
+//  1. Fetch the file tree at the default branch.
+//  2. Identify candidate Dockerfiles (root-level "Dockerfile", any
 //     "*.dockerfile").
 //  3. Fetch each Dockerfile and parse its FROM statements.
 //  4. Add a repo → image edge for every FROM, plus an image node.
-//  5. Apply configured aliases to populate Image.LinkedProducers
-//     and add repo → alias-image edges.
 //
-// Errors during the scan are tolerated per-file: a single failed
-// fetch doesn't abort the whole scan. We log the failure (via a
-// callback the caller can supply) and continue.
+// ApplyAliases adds the alias-produces edges that link registry
+// images to producing repos. It's exposed as a separate method so
+// callers can call it once after scanning all forges (aliases are
+// global, not per-forge).
+//
+// Per-file failures (network blip, decode error, etc.) are reported
+// via the error handler if one is set, then swallowed so the scan
+// can continue.
 package scanner
 
 import (
@@ -33,10 +42,11 @@ import (
 	"github.com/inful/multiforge"
 )
 
-// Scanner walks configured forges and updates its Store.
+// Scanner walks one forge and updates its Store.
 type Scanner struct {
 	client  multiforge.Client
-	cfg     *config.Config
+	forge   config.ForgeConfig // the single forge this scanner is bound to
+	cfg     *config.Config     // for aliases and state_dir
 	store   *store.Store
 	mu      sync.Mutex // protects store mutations from concurrent scan goroutines
 	logger  *slog.Logger
@@ -44,12 +54,15 @@ type Scanner struct {
 	now     func() time.Time
 }
 
-// New constructs a Scanner with the given client and config. The
-// store starts empty; callers either run Scan to populate it or
-// call Load first to merge into an existing on-disk store.
-func New(client multiforge.Client, cfg *config.Config) *Scanner {
+// New constructs a Scanner bound to one forge. The client must be
+// configured for that forge; mixing a github.Client with a gitlab
+// ForgeConfig (or vice versa) will produce wrong results. The store
+// starts empty; callers either run Scan to populate it or call
+// Load first to merge into an existing on-disk store.
+func New(client multiforge.Client, forge config.ForgeConfig, cfg *config.Config) *Scanner {
 	return &Scanner{
 		client: client,
+		forge:  forge,
 		cfg:    cfg,
 		store:  &store.Store{},
 		logger: slog.Default(),
@@ -94,34 +107,18 @@ func (s *Scanner) Save() error {
 	return store.Save(s.cfg.StateDir, s.store)
 }
 
-// Scan walks each forge in the config, lists repos, fetches
-// Dockerfiles, and updates the store. It's safe to call Scan
-// repeatedly; the second call merges with whatever Load returned.
+// Scan walks the configured forge's repos, fetches their Dockerfiles,
+// and updates the store. It's safe to call Scan repeatedly; the
+// second call merges with whatever Load returned.
 //
 // Per-file failures (network blip, decode error, etc.) are reported
 // via the error handler if one is set, then swallowed so the scan
 // can continue.
 func (s *Scanner) Scan(ctx context.Context) error {
 	now := s.now()
-	for name, fc := range s.cfg.Forges {
-		if err := s.scanForge(ctx, name, fc, now); err != nil {
-			s.reportError(name, fmt.Errorf("scan forge %q: %w", name, err))
-		}
-	}
-	s.applyAliases(now)
-	return nil
-}
-
-// scanForge processes a single forge: list repos, then scan each.
-// The scanner uses the caller-supplied client regardless of which
-// forge entry is being processed; this means a single Client can
-// only talk to one forge. To scan multiple forges, callers should
-// construct one Scanner per Client. (This is what the CLI does.)
-func (s *Scanner) scanForge(ctx context.Context, name string, fc config.ForgeConfig, now time.Time) error {
-	_ = name
-	repos, err := s.client.ListUserRepos(ctx, fc.User)
+	repos, err := s.client.ListUserRepos(ctx, s.forge.User)
 	if err != nil {
-		return fmt.Errorf("list repos for user %q: %w", fc.User, err)
+		return fmt.Errorf("list repos for user %q: %w", s.forge.User, err)
 	}
 
 	// Cap concurrency at 4 to be polite to the forge. Each scan is a
@@ -142,6 +139,14 @@ func (s *Scanner) scanForge(ctx context.Context, name string, fc config.ForgeCon
 	}
 	wg.Wait()
 	return nil
+}
+
+// ApplyAliases adds alias-produces edges to the store for each
+// entry in cfg.Aliases. Call this once after all forges have been
+// scanned (aliases are global, not per-forge). It's idempotent:
+// re-running with the same aliases is a no-op.
+func (s *Scanner) ApplyAliases() {
+	s.applyAliases(s.now())
 }
 
 // scanRepo processes one repo: discover its Dockerfiles, fetch each,
@@ -263,17 +268,24 @@ func (s *Scanner) upsertAliasImage(a config.Alias, now time.Time) {
 
 // repoID constructs a stable forge-native identifier for a repo.
 // Format: "<forge-host>/<owner>/<name>" — e.g. "github.com/inful/dockdeps".
-// The forge part comes from the Backend field, but for the host we
-// default to "github.com" / "gitlab.com" / "forgejo" so the ID is
-// stable across runs.
+// The host part is derived from the Backend field so the ID is
+// stable across runs and across Scanner instances that talk to
+// different forge deployments.
 func repoID(r multiforge.Repository) string {
-	host := string(r.Forge) + ".com"
-	if r.Forge == multiforge.GitHub {
+	var host string
+	switch r.Forge {
+	case multiforge.GitHub:
 		host = "github.com"
-	} else if r.Forge == multiforge.GitLab {
+	case multiforge.GitLab:
 		host = "gitlab.com"
-	} else if r.Forge == multiforge.Forgejo {
+	case multiforge.Forgejo:
+		// Forgejo has no canonical host — it's whatever the
+		// operator deployed. Use the Backend name as a stable
+		// marker; callers that need the real host can read the
+		// repository's Forge field elsewhere.
 		host = string(r.Forge)
+	default:
+		host = string(r.Forge) + ".com"
 	}
 	return host + "/" + r.Owner + "/" + r.Name
 }

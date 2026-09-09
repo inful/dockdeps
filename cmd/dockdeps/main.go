@@ -291,12 +291,17 @@ func loadConfig(path string) (*config.Config, error) {
 }
 
 // runScan wires up a multiforge client per forge and runs the
-// scanner. In Phase 1 we build one client per forge in the config;
-// later phases can multiplex them via a fan-out client.
+// scanner. Each forge gets its own Scanner because a single
+// multiforge.Client is bound to one backend; the CLI is responsible
+// for iterating over cfg.Forges.
+//
+// The state load/save cycle runs once per forge (cheap when the
+// store is already in memory; the temp+rename dance is
+// sub-millisecond). Aliases are applied by the last Scanner so
+// every forge's repos are visible to the alias resolver.
 func runScan(cfg *config.Config) error {
-	// For now, process each forge sequentially. Each forge gets its
-	// own scanner so its client has a single backend.
 	var lastErr error
+	var lastScanner *scanner.Scanner
 	for name, fc := range cfg.Forges {
 		client, err := buildClient(fc)
 		if err != nil {
@@ -304,7 +309,7 @@ func runScan(cfg *config.Config) error {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", lastErr)
 			continue
 		}
-		s := scanner.New(client, cfg)
+		s := scanner.New(client, fc, cfg)
 		if err := s.Load(); err != nil {
 			lastErr = err
 			fmt.Fprintf(os.Stderr, "warning: load state for forge %q: %v\n", name, err)
@@ -316,6 +321,14 @@ func runScan(cfg *config.Config) error {
 		if err := s.Save(); err != nil {
 			lastErr = err
 			fmt.Fprintf(os.Stderr, "warning: save state for forge %q: %v\n", name, err)
+		}
+		lastScanner = s
+	}
+	if lastScanner != nil {
+		lastScanner.ApplyAliases()
+		if err := lastScanner.Save(); err != nil {
+			lastErr = err
+			fmt.Fprintf(os.Stderr, "warning: save state after applying aliases: %v\n", err)
 		}
 	}
 	return lastErr
@@ -389,7 +402,6 @@ func main() {
 		kong.Name("dockdeps"),
 		kong.Description("Track Docker image dependencies across multiple forges."),
 		kong.UsageOnError(),
-		kong.Vars{"version": Version},
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

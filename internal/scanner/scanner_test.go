@@ -3,9 +3,7 @@ package scanner_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -120,7 +118,7 @@ func TestScanner_BasicScan(t *testing.T) {
 		},
 	}
 
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -154,7 +152,7 @@ func TestScanner_PersistsState(t *testing.T) {
 		},
 	}
 
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -183,10 +181,14 @@ func TestScanner_AliasLinking(t *testing.T) {
 		},
 	}
 
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Aliases are applied by an explicit call, not auto-applied
+	// during Scan. This makes multi-forge workflows deterministic
+	// (the CLI applies aliases once after all forges are scanned).
+	s.ApplyAliases()
 
 	// The alias adds an image AND an edge (alias-produces) linking
 	// the repo to the image.
@@ -226,7 +228,7 @@ func TestScanner_ToleratesGetFileFailure(t *testing.T) {
 		},
 	}
 
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	// Scan should still complete; the failed file is just skipped.
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -253,7 +255,7 @@ func TestScanner_RecordsLastSeen(t *testing.T) {
 	}
 
 	before := time.Now()
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -276,12 +278,92 @@ func imageIDs(images []store.Image) []string {
 	return out
 }
 
-// stringsContains is a tiny helper to keep test assertions readable.
-func stringsContains(s, sub string) bool {
-	return strings.Contains(s, sub)
+// TestScanner_OneScannerPerForge is a regression test for a bug
+// where Scanner.Scan iterated over cfg.Forges internally but used a
+// single multiforge.Client for all of them. With a config that
+// declared both github and gitlab forges but a Client bound to
+// github, only github would actually be scanned and the operator
+// would see no error.
+//
+// The fix: Scanner takes a single ForgeConfig at construction and
+// scans only that forge. Callers iterate over multi-forge configs
+// and construct one Scanner per forge.
+func TestScanner_OneScannerPerForge(t *testing.T) {
+	fc := newFakeClient()
+	cfg := &config.Config{
+		Forges: map[string]config.ForgeConfig{
+			"github": {Backend: "github", Token: "x", User: "inful"},
+			// A second forge declared in config but for which we
+			// have no client. The Scanner should NOT try to use
+			// the github client to list gitlab repos — that would
+			// either silently succeed against the wrong backend or
+			// return a confusing error.
+			"gitlab": {Backend: "gitlab", Token: "y", User: "inful"},
+		},
+	}
+
+	// Construct a Scanner for ONLY github. The gitlab entry is
+	// irrelevant to this Scanner instance.
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
+	if err := s.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// The fake client's ListUserRepos should have been called
+	// exactly once (for the github forge, not for gitlab).
+	if fc.listUserCalled != 1 {
+		t.Errorf("expected ListUserRepos called once (for github), got %d", fc.listUserCalled)
+	}
+
+	// The repos in the store should all be from github (forge
+	// field set by convertRepo), not from a phantom gitlab run.
+	for _, r := range s.Store().Repos {
+		if r.Forge != "github" {
+			t.Errorf("repo %s has forge=%q, want github", r.ID, r.Forge)
+		}
+	}
 }
 
-// filepathBase is used in some tests to confirm filenames.
-func filepathBase(p string) string {
-	return filepath.Base(p)
+// TestScanner_ApplyAliasesNotAutoApplied pins the new contract:
+// aliases are applied only when the caller explicitly calls
+// ApplyAliases. Scan no longer does it implicitly. This makes the
+// multi-forge case work (each Scanner applies its own aliases,
+// dedup handles overlap).
+func TestScanner_ApplyAliasesNotAutoApplied(t *testing.T) {
+	fc := newFakeClient()
+	cfg := &config.Config{
+		Forges: map[string]config.ForgeConfig{
+			"github": {Backend: "github", Token: "x", User: "inful"},
+		},
+		Aliases: []config.Alias{
+			{Image: "ghcr.io/inful/app:latest", Source: "github.com/inful/app"},
+		},
+	}
+
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
+	if err := s.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without an explicit ApplyAliases call, no alias edges should
+	// be in the store.
+	for _, e := range s.Store().Edges {
+		if e.Kind == "alias-produces" {
+			t.Errorf("alias edge %+v present before ApplyAliases called", e)
+		}
+	}
+
+	// Now apply aliases; the edge should appear.
+	s.ApplyAliases()
+
+	found := false
+	for _, e := range s.Store().Edges {
+		if e.Kind == "alias-produces" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("alias-produces edge missing after ApplyAliases call")
+	}
 }

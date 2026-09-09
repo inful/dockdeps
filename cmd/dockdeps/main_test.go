@@ -312,7 +312,7 @@ func TestScanner_WithFakeClient(t *testing.T) {
 			"github": {Backend: "github", Token: "x", User: "inful"},
 		},
 	}
-	s := scanner.New(fc, cfg)
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
 	if err := s.Scan(context.Background()); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestScanner_WithFakeClient(t *testing.T) {
 // can't intercept it from the CLI test, but we can confirm the
 // field is used by setting it in a scanner.
 var _ = func() *scanner.Scanner {
-	s := scanner.New(nil, nil)
+	s := scanner.New(nil, config.ForgeConfig{}, &config.Config{})
 	s.SetErrorHandler(func(string, error) {})
 	return s
 }
