@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -93,8 +94,9 @@ func runCLI(t *testing.T, args []string) (stdout, stderr string, exitCode int) {
 }
 
 // runMainForTest is a wrapper around the same logic as main() but
-// returns the exit code rather than calling os.Exit. Defined in
-// main_test.go so we can call it from tests without exporting.
+// returns the exit code rather than calling os.Exit. Errors from
+// Run() are written to stderr so callers can assert on them. Defined
+// in main_test.go so we can call it from tests without exporting.
 func runMainForTest(args []string) int {
 	cli := &CLI{}
 	parser, err := kong.New(cli,
@@ -104,6 +106,7 @@ func runMainForTest(args []string) int {
 		kong.Exit(func(int) {}),
 	)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
 	kctx, err := parser.Parse(args)
@@ -112,6 +115,7 @@ func runMainForTest(args []string) int {
 		return 2
 	}
 	if err := kctx.Run(cli); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
 	return 0
@@ -334,3 +338,178 @@ var _ = func() *scanner.Scanner {
 var (
 	_ = scanner.New
 )
+
+// TestCLI_AliasesList confirms `aliases list` prints configured
+// aliases from the config file.
+func TestCLI_AliasesList(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Run init so the config file exists with no aliases yet.
+	_, _, _ = runCLI(t, []string{"init"})
+
+	// Re-read the config and add some aliases programmatically.
+	cfg, err := config.Load(filepath.Join(dir, ".config", "dockdeps", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Aliases = []config.Alias{
+		{Image: "ghcr.io/inful/app", Source: "github.com/inful/app"},
+		{Image: "ghcr.io/inful/cli", Source: "github.com/inful/cli"},
+	}
+	if err := config.Save(filepath.Join(dir, ".config", "dockdeps", "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, _ := runCLI(t, []string{"aliases", "list"})
+	if !strings.Contains(stdout, "ghcr.io/inful/app") {
+		t.Errorf("output missing first alias: %q", stdout)
+	}
+	if !strings.Contains(stdout, "ghcr.io/inful/cli") {
+		t.Errorf("output missing second alias: %q", stdout)
+	}
+}
+
+// TestCLI_AliasesAdd confirms `aliases add` appends to the config
+// file and persists the change.
+func TestCLI_AliasesAdd(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	_, _, _ = runCLI(t, []string{"init"})
+
+	cfgPath := filepath.Join(dir, ".config", "dockdeps", "config.yaml")
+	stdout, _, _ := runCLI(t, []string{"aliases", "add", "ghcr.io/inful/app", "github.com/inful/app"})
+	if !strings.Contains(stdout, "added alias") {
+		t.Errorf("expected 'added alias' confirmation, got %q", stdout)
+	}
+
+	// Reload and verify the alias is present.
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Aliases) != 1 {
+		t.Fatalf("Aliases = %d, want 1", len(cfg.Aliases))
+	}
+	if cfg.Aliases[0].Image != "ghcr.io/inful/app" {
+		t.Errorf("Image = %q", cfg.Aliases[0].Image)
+	}
+	if cfg.Aliases[0].Source != "github.com/inful/app" {
+		t.Errorf("Source = %q", cfg.Aliases[0].Source)
+	}
+}
+
+// TestCLI_AliasesAddDedupe confirms adding the same alias twice
+// fails without persisting.
+func TestCLI_AliasesAddDedupe(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	_, _, _ = runCLI(t, []string{"init"})
+
+	cfgPath := filepath.Join(dir, ".config", "dockdeps", "config.yaml")
+	_, _, _ = runCLI(t, []string{"aliases", "add", "ghcr.io/inful/app", "github.com/inful/app"})
+
+	_, stderr, exitCode := runCLI(t, []string{"aliases", "add", "ghcr.io/inful/app", "github.com/inful/app"})
+	if exitCode == 0 {
+		t.Error("expected non-zero exit on duplicate alias")
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("expected 'already exists' in stderr, got %q", stderr)
+	}
+
+	// Confirm the file still has exactly one alias (not two).
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Aliases) != 1 {
+		t.Errorf("Aliases = %d, want 1 (second add should not persist)", len(cfg.Aliases))
+	}
+}
+
+// TestCLI_GraphMermaid confirms `graph --format mermaid` produces
+// Mermaid output (which becomes useful when the scanner is wired
+// in later phases; for now we just verify the CLI plumbing works
+// against a populated state).
+func TestCLI_GraphMermaid(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	_, _, _ = runCLI(t, []string{"init"})
+
+	cfg, err := config.Load(filepath.Join(dir, ".config", "dockdeps", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &store.Store{
+		Repos: []store.Repo{
+			{ID: "github.com/inful/app", Owner: "inful", Name: "app", DefaultBranch: "main"},
+		},
+		Images: []store.Image{
+			{ID: "docker.io/library/golang:1.22"},
+		},
+		Edges: []store.Edge{
+			{FromKind: "repo", FromID: "github.com/inful/app", ToKind: "image", ToID: "docker.io/library/golang:1.22"},
+		},
+	}
+	if err := store.Save(cfg.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, _ := runCLI(t, []string{"graph", "--format", "mermaid"})
+	if !strings.Contains(stdout, "flowchart LR") {
+		t.Errorf("expected Mermaid output, got: %.80q...", stdout)
+	}
+}
+
+// TestCLI_GraphDOT confirms `graph --format dot` produces DOT.
+func TestCLI_GraphDOT(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	_, _, _ = runCLI(t, []string{"init"})
+
+	cfg, err := config.Load(filepath.Join(dir, ".config", "dockdeps", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &store.Store{
+		Repos: []store.Repo{
+			{ID: "github.com/inful/app", Owner: "inful", Name: "app", DefaultBranch: "main"},
+		},
+		Edges: []store.Edge{
+			{FromKind: "repo", FromID: "github.com/inful/app", ToKind: "image", ToID: "docker.io/library/golang:1.22"},
+		},
+	}
+	if err := store.Save(cfg.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, _ := runCLI(t, []string{"graph", "--format", "dot"})
+	if !strings.Contains(stdout, "digraph G {") {
+		t.Errorf("expected DOT output, got: %.80q...", stdout)
+	}
+}
+
+// TestCLI_GraphHTML confirms `graph --format html` produces HTML.
+func TestCLI_GraphHTML(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	_, _, _ = runCLI(t, []string{"init"})
+
+	cfg, err := config.Load(filepath.Join(dir, ".config", "dockdeps", "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &store.Store{
+		Repos: []store.Repo{
+			{ID: "github.com/inful/app", Owner: "inful", Name: "app", DefaultBranch: "main"},
+		},
+	}
+	if err := store.Save(cfg.StateDir, s); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, _ := runCLI(t, []string{"graph", "--format", "html"})
+	if !strings.Contains(stdout, "<!DOCTYPE html>") {
+		t.Errorf("expected HTML output, got: %.80q...", stdout)
+	}
+}

@@ -13,3 +13,8 @@
 
 # OS
 .DS_Store
+
+# Test artefacts written by `t.Setenv("HOME", dir)` when expandHome
+# is missing/partial — keeps a stray literal `~/` tree out of git.
+**/~/
+**/~/

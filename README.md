@@ -74,14 +74,27 @@ dockdeps graph --format json
 | Command | Description |
 |---|---|
 | `init` | Scaffold the config file and state directory at `~/.config/dockdeps/` and `~/.local/share/dockdeps/state/` |
-| `scan` | Walk each configured forge, fetch Dockerfiles, and update the dependency graph |
+| `scan` | Walk each configured forge, fetch Dockerfiles and `docker-compose.yml`, and update the dependency graph |
 | `ls [repos\|images]` | List known entities from the on-disk state |
 | `dependents <id>` | Show repos that depend on the given image or repo |
 | `dependencies <id>` | Show what the given image or repo depends on |
 | `tree <id> [--depth N]` | Render a tree of dependencies rooted at the given node |
-| `graph --format json` | Export the full graph as JSON |
-| `doctor` | Check configuration and report forge setup |
+| `graph --format json\|dot\|mermaid\|html` | Export the full graph in one of several formats |
+| `aliases list` | Print all configured image→repo aliases |
+| `aliases add <image> <source>` | Append a new alias and save the config |
+| `doctor` | Check configuration and forge setup |
 | `version` | Print the dockdeps version |
+
+## Graph formats
+
+`dockdeps graph` produces the dependency graph in one of four formats:
+
+| Format | Use case |
+|---|---|
+| `json` | Machine-readable; downstream tooling can transform into anything else |
+| `dot` | Graphviz — render with `dot -Tsvg graph.dot > graph.svg` |
+| `mermaid` | Markdown-friendly; renders inline on GitHub, GitLab, etc. |
+| `html` | Self-contained HTML page with inline SVG; no JavaScript or external resources |
 
 ## Configuration
 

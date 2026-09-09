@@ -293,3 +293,73 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// TestSave_RoundTrip confirms that Load → Save → Load produces the
+// same data (modulo whitespace). Used by `dockdeps aliases add` to
+// persist new alias entries.
+func TestSave_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	writeFile(t, path, `
+version: 1
+forges:
+  github:
+    backend: github
+    token: x
+    user: inful
+aliases:
+  - image: ghcr.io/inful/app
+    source: github.com/inful/app
+  - image: ghcr.io/inful/worker
+    source: github.com/inful/worker
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a third alias, save, reload.
+	cfg.Aliases = append(cfg.Aliases, config.Alias{
+		Image:  "ghcr.io/inful/cli",
+		Source: "github.com/inful/cli",
+	})
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg2, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg2.Aliases) != 3 {
+		t.Fatalf("Aliases = %d, want 3", len(cfg2.Aliases))
+	}
+	if cfg2.Aliases[2].Image != "ghcr.io/inful/cli" {
+		t.Errorf("Aliases[2].Image = %q", cfg2.Aliases[2].Image)
+	}
+}
+
+func TestSave_Atomic(t *testing.T) {
+	// Save should never leave the file in a half-written state.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := &config.Config{
+		Version: 1,
+		Forges: map[string]config.ForgeConfig{
+			"github": {Backend: "github", Token: "x", User: "inful"},
+		},
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	// Re-read; the file must be valid YAML.
+	cfg2, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if cfg2.Forges["github"].User != "inful" {
+		t.Errorf("Save then Load lost data")
+	}
+}

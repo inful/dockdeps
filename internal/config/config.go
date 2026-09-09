@@ -125,6 +125,43 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// Save writes cfg back to path as YAML, atomically. The existing
+// file (if any) is replaced via tempfile-then-rename so a crash
+// mid-write leaves the previous good copy in place.
+func Save(path string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("config: mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("config: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: write: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("config: close: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("config: rename: %w", err)
+	}
+	cleanup = false
+	return nil
+}
+
 // applyDefaults fills in fields the operator didn't specify. Run
 // after Unmarshal so callers don't have to repeat themselves.
 func applyDefaults(cfg *Config) {

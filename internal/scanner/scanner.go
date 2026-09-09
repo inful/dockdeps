@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/inful/dockdeps/internal/compose"
 	"github.com/inful/dockdeps/internal/config"
 	"github.com/inful/dockdeps/internal/identity"
 	"github.com/inful/dockdeps/internal/parser"
@@ -161,6 +162,15 @@ func (s *Scanner) scanRepo(ctx context.Context, r multiforge.Repository, now tim
 		LastSeen:      now,
 	}
 
+	// Process compose files first so the repo→image edges from
+	// compose are in the store before dockerfile FROMs are
+	// resolved (which produces image-image edges). Order doesn't
+	// actually affect the graph, but it keeps the data flow
+	// predictable for debug logs.
+	if err := s.scanComposeFiles(ctx, r, repo.ID, now); err != nil {
+		s.reportError(r.FullName, err)
+	}
+
 	candidates, err := s.discoverDockerfiles(ctx, r)
 	if err != nil {
 		s.reportError(r.FullName, err)
@@ -232,6 +242,85 @@ func (s *Scanner) discoverDockerfiles(ctx context.Context, r multiforge.Reposito
 		}
 	}
 	return out, nil
+}
+
+// discoverComposeFiles returns candidate docker-compose filenames
+// at the repo root. We look for both the canonical
+// `docker-compose.yml` and the modern `compose.yaml`/`compose.yml`
+// names. The first match wins.
+func (s *Scanner) discoverComposeFiles(ctx context.Context, r multiforge.Repository) ([]multiforge.FileInfo, error) {
+	entries, err := s.client.ListFiles(ctx, r.Owner, r.Name, "", r.DefaultBranch)
+	if err != nil {
+		return nil, fmt.Errorf("list files at root: %w", err)
+	}
+	candidates := map[string]bool{
+		"docker-compose.yml": true,
+		"docker-compose.yaml": true,
+		"compose.yml":        true,
+		"compose.yaml":       true,
+	}
+	var out []multiforge.FileInfo
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		name := e.Path
+		if idx := lastSlash(name); idx >= 0 {
+			name = name[idx+1:]
+		}
+		if candidates[name] {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// scanComposeFiles fetches each discovered compose file and adds
+// service→image edges (Kind="compose-image") to the store.
+func (s *Scanner) scanComposeFiles(ctx context.Context, r multiforge.Repository, repoID string, now time.Time) error {
+	files, err := s.discoverComposeFiles(ctx, r)
+	if err != nil {
+		s.reportError(r.FullName, err)
+		return nil
+	}
+	for _, c := range files {
+		content, err := s.client.GetFile(ctx, r.Owner, r.Name, c.Path, r.DefaultBranch)
+		if err != nil {
+			s.reportError(r.FullName, fmt.Errorf("GetFile %s: %w", c.Path, err))
+			continue
+		}
+		cf, err := compose.Parse(string(content))
+		if err != nil {
+			s.reportError(r.FullName, fmt.Errorf("parse %s: %w", c.Path, err))
+			continue
+		}
+		for _, svc := range cf.Services {
+			if svc.Image == "" {
+				continue // service uses `build:` without an `image:`; can't attribute
+			}
+			img, err := identity.Parse(svc.Image)
+			if err != nil {
+				s.reportError(r.FullName, fmt.Errorf("service %q image %q: %w", svc.Name, svc.Image, err))
+				continue
+			}
+			stored := s.upsertImage(img, now)
+			_ = stored // identity already on the image
+			s.upsertEdge(store.Edge{
+				FromKind: "repo",
+				FromID:   repoID,
+				ToKind:   "image",
+				ToID:     img.ID(),
+				Kind:     "compose-image",
+				Location: store.Location{
+					Repo: repoID,
+					File: c.Path,
+					Line: 0, // compose parser doesn't track line numbers
+				},
+				Parameterized: svc.Parameterized,
+			})
+		}
+	}
+	return nil
 }
 
 // applyAliases walks cfg.Aliases and for each entry:

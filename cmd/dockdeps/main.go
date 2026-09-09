@@ -46,6 +46,7 @@ type CLI struct {
 	Dependencies DependenciesCmd `cmd:"" name:"dependencies" help:"Show what the given image or repo depends on."`
 	Tree         TreeCmd         `cmd:"" help:"Render a tree of dependencies."`
 	Graph        GraphCmd        `cmd:"" help:"Export the full dependency graph."`
+	Aliases      AliasesCmd      `cmd:"" help:"Manage image-to-repo aliases."`
 	Doctor       DoctorCmd       `cmd:"" help:"Check configuration and forge connectivity."`
 	Version      VersionCmd      `cmd:"" help:"Print dockdeps version."`
 }
@@ -212,7 +213,7 @@ func (c *TreeCmd) Run(globals *CLI) error {
 
 // GraphCmd exports the full graph.
 type GraphCmd struct {
-	Format string `help:"Output format" enum:"json,dot,mermaid" default:"json"`
+	Format string `help:"Output format" enum:"json,dot,mermaid,html" default:"json"`
 }
 
 func (c *GraphCmd) Run(globals *CLI) error {
@@ -225,18 +226,78 @@ func (c *GraphCmd) Run(globals *CLI) error {
 		return fmt.Errorf("graph: load state: %w", err)
 	}
 	g := graph.New(s)
+	var out []byte
 	switch c.Format {
 	case "json":
-		out, err := render.GraphJSON(g)
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-	case "dot", "mermaid":
-		return fmt.Errorf("graph --format=%s: not yet implemented (Phase 2)", c.Format)
+		out, err = render.GraphJSON(g)
+	case "mermaid":
+		out, err = render.Mermaid(g)
+	case "dot":
+		out, err = render.DOT(g)
+	case "html":
+		out, err = render.HTML(g)
 	default:
 		return fmt.Errorf("unknown format %q", c.Format)
 	}
+	if err != nil {
+		return fmt.Errorf("graph: render %s: %w", c.Format, err)
+	}
+	fmt.Println(string(out))
+	return nil
+}
+
+// AliasesCmd manages image-to-repo aliases in the config file.
+// Subcommands:
+//
+//	aliases list                       — print all configured aliases
+//	aliases add <image> <source>       — append a new alias and save
+type AliasesCmd struct {
+	List AliasesListCmd `cmd:"" help:"Print all configured aliases."`
+	Add  AliasesAddCmd  `cmd:"" help:"Append a new alias."`
+}
+
+// AliasesListCmd prints the configured aliases.
+type AliasesListCmd struct{}
+
+func (c *AliasesListCmd) Run(globals *CLI) error {
+	cfg, err := loadConfig(globals.Config)
+	if err != nil {
+		return err
+	}
+	for _, a := range cfg.Aliases {
+		fmt.Printf("%s\t%s\n", a.Image, a.Source)
+	}
+	return nil
+}
+
+// AliasesAddCmd appends a new alias to the config file.
+type AliasesAddCmd struct {
+	Image  string `arg:"" help:"Registry image path (e.g., ghcr.io/me/app)."`
+	Source string `arg:"" help:"Forge repo path that produces the image (e.g., github.com/me/app)."`
+}
+
+func (c *AliasesAddCmd) Run(globals *CLI) error {
+	cfg, err := loadConfig(globals.Config)
+	if err != nil {
+		return err
+	}
+	// Dedup: refuse to add the same image+source pair twice.
+	for _, a := range cfg.Aliases {
+		if a.Image == c.Image && a.Source == c.Source {
+			return fmt.Errorf("alias already exists: %s -> %s", c.Image, c.Source)
+		}
+	}
+	cfg.Aliases = append(cfg.Aliases, config.Alias{Image: c.Image, Source: c.Source})
+	// Save needs the same path Load saw, not the raw --config
+	// value (which may carry an unexpanded ~).
+	path, err := expandHome(globals.Config)
+	if err != nil {
+		return err
+	}
+	if err := config.Save(path, cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	fmt.Printf("added alias: %s -> %s\n", c.Image, c.Source)
 	return nil
 }
 
@@ -269,21 +330,36 @@ func (c *VersionCmd) Run() error {
 	return nil
 }
 
+// expandHome expands a leading "~" in path to the current user's
+// home directory. Other paths are returned unchanged. Used to
+// normalise the value passed via --config so Load and Save both
+// see the same path.
+func expandHome(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("config path is empty; pass --config or set $DOCKDEPS_CONFIG")
+	}
+	if path[0] != '~' {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("expand ~: %w", err)
+	}
+	return filepath.Join(home, path[1:]), nil
+}
+
 // loadConfig reads and expands the config file at the given path.
+// ${ENV} interpolation is applied to all string fields at this
+// point so downstream code never sees literal "${...}" markers.
+//
 // We expand ~ to the user's home directory first since that's the
 // default path users will see.
 func loadConfig(path string) (*config.Config, error) {
-	if path == "" {
-		return nil, fmt.Errorf("config path is empty; pass --config or set $DOCKDEPS_CONFIG")
+	expanded, err := expandHome(path)
+	if err != nil {
+		return nil, err
 	}
-	if path[0] == '~' {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("expand ~: %w", err)
-		}
-		path = filepath.Join(home, path[1:])
-	}
-	cfg, err := config.Load(path)
+	cfg, err := config.Load(expanded)
 	if err != nil {
 		return nil, err
 	}

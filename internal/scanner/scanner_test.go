@@ -104,10 +104,14 @@ func (f *fakeClient) GetFile(ctx context.Context, owner, repo, path, ref string)
 }
 
 func (f *fakeClient) ListFiles(ctx context.Context, owner, repo, path, ref string) ([]multiforge.FileInfo, error) {
+	var out []multiforge.FileInfo
 	if _, ok := f.contents[f.key(owner, repo, "Dockerfile")]; ok {
-		return []multiforge.FileInfo{{Path: "Dockerfile", SHA: "abc"}}, nil
+		out = append(out, multiforge.FileInfo{Path: "Dockerfile", SHA: "abc"})
 	}
-	return nil, nil
+	if _, ok := f.contents[f.key(owner, repo, "docker-compose.yml")]; ok {
+		out = append(out, multiforge.FileInfo{Path: "docker-compose.yml", SHA: "def"})
+	}
+	return out, nil
 }
 
 func TestScanner_BasicScan(t *testing.T) {
@@ -276,6 +280,44 @@ func imageIDs(images []store.Image) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestScanner_ComposeFile exercises the compose-file path: when a
+// repo has a docker-compose.yml at the root with services that
+// reference images, those images should be added to the graph as
+// repo→image edges with Kind="compose-image".
+func TestScanner_ComposeFile(t *testing.T) {
+	fc := newFakeClient()
+	// Add a compose file with one service referencing nginx.
+	fc.contents["inful/app/docker-compose.yml"] = []byte(`services:
+  web:
+    image: nginx:1.27
+`)
+
+	cfg := &config.Config{
+		Forges: map[string]config.ForgeConfig{
+			"github": {Backend: "github", Token: "x", User: "inful"},
+		},
+	}
+
+	s := scanner.New(fc, cfg.Forges["github"], cfg)
+	if err := s.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find the compose edge.
+	var found bool
+	for _, e := range s.Store().Edges {
+		if e.Kind == "compose-image" &&
+			e.FromID == "github.com/inful/app" &&
+			e.ToID == "docker.io/library/nginx:1.27" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected compose-image edge for nginx")
+	}
 }
 
 // TestScanner_OneScannerPerForge is a regression test for a bug
