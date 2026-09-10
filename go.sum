@@ -6,8 +6,8 @@ github.com/alecthomas/repr v0.5.2 h1:SU73FTI9D1P5UNtvseffFSGmdNci/O6RsqzeXJtP0Qs
 github.com/alecthomas/repr v0.5.2/go.mod h1:Fr0507jx4eOXV7AlPV6AVZLYrLIuIeSOWtW57eE/O/4=
 github.com/hexops/gotextdiff v1.0.3 h1:gitA9+qJrrTCsiCl7+kh75nPqQt1cx4ZkudSTLoUqJM=
 github.com/hexops/gotextdiff v1.0.3/go.mod h1:pSWU5MAI3yDq+fZBTazCSJysOMbxWL1BSow5/V2vxeg=
-github.com/inful/multiforge v0.1.0 h1:AuX0U2sDwQKm6Q7E6/ip2shBpaFojHrHqW96hA0d0zs=
-github.com/inful/multiforge v0.1.0/go.mod h1:kZX0uVRj7p2+2zRAgXJmHYsl45iMiTvxxTSWUgOcsm8=
+github.com/inful/multiforge v0.1.1 h1:ktO9qBAECcLSNFd9Kr8fjKPwmeAtpCf8OV8ZJ/EVees=
+github.com/inful/multiforge v0.1.1/go.mod h1:kZX0uVRj7p2+2zRAgXJmHYsl45iMiTvxxTSWUgOcsm8=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
